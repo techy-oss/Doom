@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Doom-like Game</title>
+  <style>
+    body { margin: 0; }
+    canvas { display: block; }
+    #health-bar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 200px;
+      height: 20px;
+      background-color: #333;
+    }
+    #health {
+      height: 100%;
+      background-color: #0f0;
+    }
+  </style>
+</head>
+<body>
+  <canvas></canvas>
+  <div id="health-bar">
+    <div id="health"></div>
+  </div>
+  <!-- Load Three.js and Cannon.js from CDNs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+  <script>
+    class Game {
+      constructor() {
+        // Initialize the 3D scene
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(
+          75, // Field of view
+          window.innerWidth / window.innerHeight, // Aspect ratio
+          0.1, // Near clipping plane
+          1000 // Far clipping plane
+        );
+        this.renderer = new THREE.WebGLRenderer({ canvas: document.querySelector('canvas') });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+
+        // Texture Loader
+        const textureLoader = new THREE.TextureLoader();
+
+        // Load Textures
+        const floorTexture = textureLoader.load('https://threejs.org/examples/textures/hardwood2_diffuse.jpg');
+        const wallTexture = textureLoader.load('https://threejs.org/examples/textures/brick_diffuse.jpg');
+        const enemyTexture = textureLoader.load('enemy.png'); // Load the enemy image
+
+        // Configure Texture Wrapping and Repetition
+        floorTexture.wrapS = THREE.RepeatWrapping;
+        floorTexture.wrapT = THREE.RepeatWrapping;
+        // Floor is now 100x100, adjust repetition
+        floorTexture.repeat.set(25, 25);
+
+        wallTexture.wrapS = THREE.RepeatWrapping;
+        wallTexture.wrapT = THREE.RepeatWrapping;
+        // Set a basic repeat for walls, might look stretched on non-uniform walls
+        wallTexture.repeat.set(1, 1);
+
+        // Create Materials with textures
+        const floorMaterial = new THREE.MeshStandardMaterial({ map: floorTexture });
+        const wallMaterial = new THREE.MeshStandardMaterial({ map: wallTexture });
+        const enemyMaterial = new THREE.SpriteMaterial({ map: enemyTexture }); // Create sprite material
+
+        // Initialize the physics world
+        this.world = new CANNON.World();
+        this.world.gravity.set(0, -9.82, 0); // Gravity in the y-direction
+
+        // Create the player physics body
+        this.playerBody = new CANNON.Body({ mass: 1 });
+        this.playerBody.addShape(new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5)));
+        this.playerBody.position.set(0, 1, 0); // Reset starting position for smaller map
+        this.world.addBody(this.playerBody);
+
+        // Player health
+        this.playerHealth = 100;
+        this.maxHealth = 100;
+        this.updateHealthBar();
+
+        // Create a larger floor
+        const floorShape = new CANNON.Plane();
+        const floorBody = new CANNON.Body({ mass: 0 }); // Static body (mass = 0)
+        floorBody.addShape(floorShape);
+        floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0); // Rotate to lie flat
+        this.world.addBody(floorBody);
+        const floorMesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(100, 100), // Smaller floor (100x100)
+          floorMaterial // Use textured material
+        );
+        floorMesh.rotation.x = -Math.PI / 2;
+        this.scene.add(floorMesh);
+
+        // Define and create a smaller map layout
+        const walls = [
+            // Boundary (approx 30x30 centered at Z=-15)
+            { position: [0, 0, -30], size: [30, 8, 1] },  // Back
+            { position: [0, 0, 0], size: [30, 8, 1] },    // Front
+            { position: [-15, 0, -15], size: [1, 8, 30] }, // Left
+            { position: [15, 0, -15], size: [1, 8, 30] }, // Right
+            // Some inner walls
+            { position: [0, 0, -10], size: [10, 8, 1] }, // Middle horizontal
+            { position: [-8, 0, -20], size: [1, 8, 10] }, // Left vertical
+            { position: [8, 0, -20], size: [1, 8, 10] }, // Right vertical
+        ];
+        walls.forEach(wall => {
+          // Visual mesh
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(wall.size[0], wall.size[1], wall.size[2]),
+            wallMaterial // Use textured material
+          );
+          mesh.position.set(
+            wall.position[0],
+            wall.position[1] + wall.size[1] / 2, // Center vertically
+            wall.position[2]
+          );
+          this.scene.add(mesh);
+
+          // Physics body
+          const body = new CANNON.Body({ mass: 0 });
+          body.addShape(new CANNON.Box(new CANNON.Vec3(
+            wall.size[0] / 2,
+            wall.size[1] / 2,
+            wall.size[2] / 2
+          )));
+          body.position.set(
+            wall.position[0],
+            wall.position[1] + wall.size[1] / 2,
+            wall.position[2]
+          );
+          this.world.addBody(body);
+        });
+
+        // Create enemies with health
+        this.enemies = [];
+        const enemyPositions = [
+          [-10, 1, -25], // Back left
+          [10, 1, -25],  // Back right
+          [0, 1, -5],   // Center front
+          [-10, 1, -15], // Mid left
+          [10, 1, -15],  // Mid right
+        ];
+        enemyPositions.forEach(pos => {
+          // Visual sprite (always faces the camera)
+          const sprite = new THREE.Sprite(
+            enemyMaterial // Use the textured sprite material
+          );
+          sprite.scale.set(3, 3, 1); // Increased enemy scale
+          sprite.position.set(pos[0], 1, pos[2]);
+          this.scene.add(sprite);
+
+          // Physics body
+          const body = new CANNON.Body({ mass: 1 });
+          body.addShape(new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5)));
+          body.position.set(pos[0], 1, pos[2]);
+          this.world.addBody(body);
+
+          // Enemy health
+          const health = 50;
+
+          this.enemies.push({ sprite, body, health });
+        });
+
+        // Add lighting
+        const ambientLight = new THREE.AmbientLight(0x404040); // Soft light
+        this.scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1); // Bright light
+        directionalLight.position.set(1, 1, 1);
+        this.scene.add(directionalLight);
+
+        // Set up input handling
+        this.keys = {};
+        document.addEventListener('keydown', (e) => this.keys[e.key] = true);
+        document.addEventListener('keyup', (e) => this.keys[e.key] = false);
+        document.addEventListener('click', () => {
+          // Request pointer lock and shoot
+          document.querySelector('canvas').requestPointerLock();
+          const raycaster = new THREE.Raycaster();
+          raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+          const intersects = raycaster.intersectObjects(this.enemies.map(e => e.sprite));
+          if (intersects.length > 0) {
+            const enemy = this.enemies.find(e => e.sprite === intersects[0].object);
+            if (enemy) {
+              enemy.health -= 25; // Damage dealt
+              if (enemy.health <= 0) {
+                this.scene.remove(enemy.sprite);
+                this.world.removeBody(enemy.body);
+                this.enemies = this.enemies.filter(e => e !== enemy);
+              }
+            }
+          }
+        });
+        document.addEventListener('mousemove', (e) => {
+          if (document.pointerLockElement) {
+            this.camera.rotation.y -= e.movementX * 0.002; // Horizontal look (left/right)
+            // Vertical look (up/down) is disabled
+            // this.camera.rotation.x -= e.movementY * 0.002;
+            // this.camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.camera.rotation.x));
+          }
+        });
+
+        // Start the game loop
+        this.update();
+      }
+
+      update() {
+        requestAnimationFrame(() => this.update());
+
+        // Handle player movement
+        const speed = 5;
+        const velocity = new CANNON.Vec3(0, 0, 0);
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        forward.y = 0; // Keep movement on the x-z plane
+        forward.normalize();
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        right.y = 0;
+        right.normalize();
+
+        if (this.keys['w']) {
+          velocity.x += forward.x * speed;
+          velocity.z += forward.z * speed;
+        }
+        if (this.keys['s']) {
+          velocity.x -= forward.x * speed;
+          velocity.z -= forward.z * speed;
+        }
+        if (this.keys['a']) {
+          velocity.x -= right.x * speed;
+          velocity.z -= right.z * speed;
+        }
+        if (this.keys['d']) {
+          velocity.x += right.x * speed;
+          velocity.z += right.z * speed;
+        }
+        // Apply velocity to physics body, preserving y-velocity (gravity)
+        this.playerBody.velocity.set(velocity.x, this.playerBody.velocity.y, velocity.z);
+
+        // Update physics simulation
+        this.world.step(1/60);
+
+        // Sync camera position with player body
+        this.camera.position.copy(this.playerBody.position);
+        this.camera.position.y += 1.6; // Eye height above the body's center
+
+        // Update enemies (move towards player and attack)
+        this.enemies.forEach(enemy => {
+          const direction = new CANNON.Vec3();
+          this.playerBody.position.vsub(enemy.body.position, direction);
+          const distance = direction.length();
+          direction.normalize();
+          enemy.body.velocity.set(direction.x * 2, enemy.body.velocity.y, direction.z * 2);
+          enemy.sprite.position.copy(enemy.body.position);
+
+          // Check for collision with player
+          if (distance < 1) {
+            this.playerHealth -= 10; // Damage to player
+            this.updateHealthBar();
+            if (this.playerHealth <= 0) {
+              alert("Game Over!");
+              document.exitPointerLock();
+              location.reload(); // Restart the game
+            }
+          }
+        });
+
+        // Render the scene
+        this.renderer.render(this.scene, this.camera);
+      }
+
+      updateHealthBar() {
+        const healthElement = document.getElementById('health');
+        const healthPercentage = (this.playerHealth / this.maxHealth) * 100;
+        healthElement.style.width = `${healthPercentage}%`;
+      }
+    }
+
+    // Start the game
+    new Game();
+  </script>
+</body>
+</html>
